@@ -1,0 +1,88 @@
+From d828da9c284e8cf99912bf57e2a9a175623fa458 Mon Sep 17 00:00:00 2001
+From: Henry Robinson <henry@cloudera.com>
+Date: Fri, 25 Aug 2017 11:51:47 -0700
+Subject: [PATCH] CLDR Patch 11: IMPALA-5849: Don't use compile-time checks to
+ disable TLS1.2
+
+This patch slightly changes the TLS configuration code to remove the
+compile-time checks that were used to disable 1.1+ support based on the
+OpenSSL library on the build machine.
+
+Instead, we define the symbols we need ourselves if necessary, and rely
+on runtime behaviour to catch errors or unsupported configurations.
+---
+ lib/cpp/src/thrift/transport/TSSLSocket.cpp | 33 +++++++++++++++++++++--------
+ 1 file changed, 24 insertions(+), 9 deletions(-)
+
+diff --git a/lib/cpp/src/thrift/transport/TSSLSocket.cpp b/lib/cpp/src/thrift/transport/TSSLSocket.cpp
+index 90bc646..1318da1 100644
+--- a/lib/cpp/src/thrift/transport/TSSLSocket.cpp
++++ b/lib/cpp/src/thrift/transport/TSSLSocket.cpp
+@@ -40,6 +40,18 @@
+ 
+ #define OPENSSL_VERSION_NO_THREAD_ID 0x10000000L
+
++ #include <iostream>
++// If these constants aren't defined, we still need them to compile.
++#ifndef SSL_OP_NO_TLSv1
++#define SSL_OP_NO_TLSv1 0x04000000L
++#endif
++#ifndef SSL_OP_NO_TLSv1_1
++#define SSL_OP_NO_TLSv1_1 0x10000000L
++#endif
++#ifndef SSL_OP_NO_TLSv1_2
++#define SSL_OP_NO_TLSv1_2 0x08000000L
++#endif
++
+ using namespace std;
+ using namespace apache::thrift::concurrency;
+ 
+@@ -137,19 +148,19 @@
+ 
+ // SSLContext implementation
+ SSLContext::SSLContext(const SSLProtocol& protocol) {
+-  if (protocol == SSLTLS) {
+-    ctx_ = SSL_CTX_new(SSLv23_method());
+-  } else if (protocol == SSLv3) {
+-    ctx_ = SSL_CTX_new(SSLv3_method());
+-  } else if (protocol == TLSv1_0) {
+-    ctx_ = SSL_CTX_new(TLSv1_method());
+-  } else if (protocol == TLSv1_1) {
+-    ctx_ = SSL_CTX_new(TLSv1_1_method());
+-  } else if (protocol == TLSv1_2) {
+-    ctx_ = SSL_CTX_new(TLSv1_2_method());
+-  } else {
+-    /// UNKNOWN PROTOCOL!
+-    throw TSSLException("SSL_CTX_new: Unknown protocol");
++  int options = SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3;
++  switch (protocol) {
++    case TLSv1_0:
++      break;
++    case TLSv1_1:
++      options |= SSL_OP_NO_TLSv1;
++      break;
++    case TLSv1_2:
++      options |= (SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1);
++      break;
++    default:
++      throw TSSLException("SSL_CTX_new: Unknown protocol");
+   }
++  ctx_ = SSL_CTX_new(SSLv23_method());
+ 
+   if (ctx_ == NULL) {
+@@ -159,11 +170,11 @@
+   }
+   SSL_CTX_set_mode(ctx_, SSL_MODE_AUTO_RETRY);
+ 
+-  // Disable horribly insecure SSLv2 and SSLv3 protocols but allow a handshake
+-  // with older clients so they get a graceful denial.
+-  if (protocol == SSLTLS) {
+-      SSL_CTX_set_options(ctx_, SSL_OP_NO_SSLv2);
+-      SSL_CTX_set_options(ctx_, SSL_OP_NO_SSLv3);   // THRIFT-3164
++  if ((SSL_CTX_set_options(ctx_, options) & options) != options) {
++    string errors;
++    buildErrors(errors);
++    throw TSSLException("SSL_CTX_set_options: " + errors);
+   }
++  std::cout << "option : " << protocol << ' ' <<  SSL_CTX_get_options(ctx_) << std::endl;
+ }
